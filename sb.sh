@@ -2,9 +2,7 @@
 
 # sing-box TUIC 自动安装配置脚本
 
-# 使用方法: bash install_singbox_tuic.sh (会自动使用 sudo)
-
-set -e
+# 使用方法: sudo bash install_singbox_tuic.sh
 
 # 颜色定义
 
@@ -13,17 +11,61 @@ GREEN=’\033[0;32m’
 YELLOW=’\033[1;33m’
 NC=’\033[0m’ # No Color
 
-# 检查是否需要使用 sudo
+# 等待 APT 锁释放的函数
 
-SUDO=””
-if [ “$EUID” -ne 0 ]; then
-if ! command -v sudo &> /dev/null; then
-echo -e “${RED}错误: 需要 root 权限或 sudo 命令${NC}”
-exit 1
+wait_for_apt() {
+local lock_files=(
+“/var/lib/dpkg/lock-frontend”
+“/var/lib/dpkg/lock”
+“/var/cache/apt/archives/lock”
+)
+
+```
+local locked=false
+for lock_file in "${lock_files[@]}"; do
+    if fuser "$lock_file" >/dev/null 2>&1; then
+        locked=true
+        break
+    fi
+done
+
+if [ "$locked" = true ]; then
+    echo -e "${YELLOW}检测到其他包管理器正在运行，等待其完成...${NC}"
+    echo -e "${YELLOW}如果长时间等待，请关闭软件更新器或重启系统${NC}"
+    
+    local count=0
+    while [ $count -lt 60 ]; do
+        local all_free=true
+        for lock_file in "${lock_files[@]}"; do
+            if fuser "$lock_file" >/dev/null 2>&1; then
+                all_free=false
+                break
+            fi
+        done
+        
+        if [ "$all_free" = true ]; then
+            echo -e "${GREEN}✓ APT 锁已释放${NC}"
+            return 0
+        fi
+        
+        sleep 2
+        count=$((count + 1))
+    done
+    
+    echo -e "${RED}错误: 等待超时，APT 仍被占用${NC}"
+    echo -e "${YELLOW}请手动关闭软件更新器、软件商店等程序后重试${NC}"
+    exit 1
 fi
-SUDO=“sudo”
-echo -e “${YELLOW}检测到非 root 用户，将使用 sudo 执行命令${NC}”
-echo “”
+```
+
+}
+
+# 检查是否以 root 权限运行
+
+if [ “$EUID” -ne 0 ]; then
+echo -e “${RED}错误: 请使用 sudo 运行此脚本${NC}”
+echo -e “${YELLOW}正确用法: sudo bash $0${NC}”
+exit 1
 fi
 
 echo -e “${GREEN}================================${NC}”
@@ -65,14 +107,15 @@ echo -e “${YELLOW}检测到缺失的依赖:${MISSING_COMMANDS}${NC}”
 echo -e “${YELLOW}正在安装依赖包…${NC}”
 
 ```
-$SUDO apt-get update -qq
+wait_for_apt
+apt-get update -qq
 
 if [[ $MISSING_COMMANDS == *"curl"* ]]; then
-    $SUDO apt-get install -y curl
+    apt-get install -y curl
 fi
 
 if [[ $MISSING_COMMANDS == *"openssl"* ]]; then
-    $SUDO apt-get install -y openssl
+    apt-get install -y openssl
 fi
 
 echo -e "${GREEN}✓ 依赖安装完成${NC}"
@@ -156,12 +199,19 @@ CERT_DAYS=3650
 echo “”
 echo -e “${YELLOW}正在安装 sing-box…${NC}”
 
+# 检查并等待 APT 锁释放
+
+wait_for_apt
+
 # 添加 sing-box 仓库并安装
 
 echo “添加 GPG 密钥…”
-$SUDO mkdir -p /etc/apt/keyrings
-$SUDO curl -fsSL https://sing-box.app/gpg.key -o /etc/apt/keyrings/sagernet.asc
-$SUDO chmod a+r /etc/apt/keyrings/sagernet.asc
+mkdir -p /etc/apt/keyrings
+if ! curl -fsSL https://sing-box.app/gpg.key -o /etc/apt/keyrings/sagernet.asc; then
+echo -e “${RED}错误: 无法下载 GPG 密钥${NC}”
+exit 1
+fi
+chmod a+r /etc/apt/keyrings/sagernet.asc
 
 echo “添加软件源…”
 echo ‘Types: deb
@@ -169,13 +219,20 @@ URIs: https://deb.sagernet.org/
 Suites: *
 Components: *
 Enabled: yes
-Signed-By: /etc/apt/keyrings/sagernet.asc’ | $SUDO tee /etc/apt/sources.list.d/sagernet.sources > /dev/null
+Signed-By: /etc/apt/keyrings/sagernet.asc’ | tee /etc/apt/sources.list.d/sagernet.sources > /dev/null
 
 echo “更新软件源…”
-$SUDO apt-get update
+if ! apt-get update; then
+echo -e “${RED}错误: apt-get update 失败${NC}”
+echo -e “${YELLOW}提示: 如果您在使用桌面版 Ubuntu，请确保软件更新器未运行${NC}”
+exit 1
+fi
 
 echo “安装 sing-box…”
-$SUDO apt-get install -y sing-box
+if ! apt-get install -y sing-box; then
+echo -e “${RED}错误: sing-box 安装失败${NC}”
+exit 1
+fi
 
 echo -e “${GREEN}✓ sing-box 安装完成${NC}”
 echo “”
@@ -183,7 +240,10 @@ echo “”
 # 生成 UUID
 
 echo -e “${YELLOW}正在生成 UUID…${NC}”
-UUID=$(sing-box generate uuid)
+if ! UUID=$(sing-box generate uuid); then
+echo -e “${RED}错误: UUID 生成失败${NC}”
+exit 1
+fi
 echo -e “${GREEN}✓ UUID 生成完成: ${UUID}${NC}”
 echo “”
 
@@ -191,7 +251,7 @@ echo “”
 
 echo -e “${YELLOW}正在生成自签名证书…${NC}”
 CERT_DIR=”/etc/sing-box”
-$SUDO mkdir -p “$CERT_DIR”
+mkdir -p “$CERT_DIR”
 
 # 获取服务器 IPv4 地址
 
@@ -203,15 +263,15 @@ fi
 
 # 生成证书
 
-$SUDO openssl req -x509 -nodes -newkey rsa:4096   
+openssl req -x509 -nodes -newkey rsa:4096   
 -keyout “$CERT_DIR/key.pem”   
 -out “$CERT_DIR/cert.pem”   
 -days “$CERT_DAYS”   
 -subj “/C=US/ST=State/L=City/O=Organization/OU=Department/CN=${SERVER_IP}”   
 2>/dev/null
 
-$SUDO chmod 600 “$CERT_DIR/key.pem”
-$SUDO chmod 644 “$CERT_DIR/cert.pem”
+chmod 600 “$CERT_DIR/key.pem”
+chmod 644 “$CERT_DIR/cert.pem”
 
 echo -e “${GREEN}✓ 证书生成完成${NC}”
 echo “”
@@ -219,7 +279,7 @@ echo “”
 # 生成配置文件
 
 echo -e “${YELLOW}正在生成配置文件…${NC}”
-$SUDO bash -c “cat > $CERT_DIR/config.json <<EOF
+bash -c “cat > $CERT_DIR/config.json <<EOF
 {
 "dns": {
 "strategy": "prefer_ipv6"
@@ -260,7 +320,7 @@ echo “”
 # 配置 systemd 服务
 
 echo -e “${YELLOW}正在配置 systemd 服务…${NC}”
-$SUDO bash -c “cat > /etc/systemd/system/sing-box.service <<EOF
+bash -c “cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
 Description=sing-box service
 Documentation=https://sing-box.sagernet.org
@@ -277,9 +337,9 @@ LimitNOFILE=infinity
 WantedBy=multi-user.target
 EOF”
 
-$SUDO systemctl daemon-reload
-$SUDO systemctl enable sing-box
-$SUDO systemctl start sing-box
+systemctl daemon-reload
+systemctl enable sing-box
+systemctl start sing-box
 
 echo -e “${GREEN}✓ sing-box 服务已启动${NC}”
 echo “”
@@ -293,7 +353,7 @@ echo -e “${YELLOW}正在安装 frpc…${NC}”
 # 检查下载工具
 if ! command -v wget &> /dev/null && ! command -v curl &> /dev/null; then
     echo -e "${YELLOW}安装 wget...${NC}"
-    $SUDO apt-get install -y wget
+    apt-get install -y wget
 fi
 
 # 检测系统架构
@@ -331,8 +391,8 @@ wget -q --show-progress "$DOWNLOAD_URL" -O frpc.tar.gz || curl -L "$DOWNLOAD_URL
 
 # 解压并安装
 tar -xzf frpc.tar.gz
-$SUDO cp ${FRPC_FILE}/frpc /usr/local/bin/
-$SUDO chmod +x /usr/local/bin/frpc
+cp ${FRPC_FILE}/frpc /usr/local/bin/
+chmod +x /usr/local/bin/frpc
 
 # 清理临时文件
 rm -rf frpc.tar.gz ${FRPC_FILE}
@@ -341,14 +401,14 @@ echo -e "${GREEN}✓ frpc 安装完成${NC}"
 
 # 创建配置目录
 FRPC_DIR="/etc/frpc"
-$SUDO mkdir -p "$FRPC_DIR"
+mkdir -p "$FRPC_DIR"
 
 # 生成随机标识符
 RANDOM_ID=$(cat /dev/urandom | tr -dc 'a-z0-9' | fold -w 8 | head -n 1)
 
 # 生成 frpc 配置文件
 echo -e "${YELLOW}正在生成 frpc 配置文件...${NC}"
-$SUDO bash -c "cat > $FRPC_DIR/frpc.toml <<EOF
+bash -c "cat > $FRPC_DIR/frpc.toml <<EOF
 ```
 
 serverAddr = "${FRPS_SERVER}"
@@ -376,7 +436,7 @@ echo -e "${GREEN}✓ frpc 配置文件生成完成${NC}"
 
 # 配置 frpc systemd 服务
 echo -e "${YELLOW}正在配置 frpc 服务...${NC}"
-$SUDO bash -c "cat > /etc/systemd/system/frpc.service <<EOF
+bash -c "cat > /etc/systemd/system/frpc.service <<EOF
 ```
 
 [Unit]
@@ -396,9 +456,9 @@ WantedBy=multi-user.target
 EOF”
 
 ```
-$SUDO systemctl daemon-reload
-$SUDO systemctl enable frpc
-$SUDO systemctl start frpc
+systemctl daemon-reload
+systemctl enable frpc
+systemctl start frpc
 
 echo -e "${GREEN}✓ frpc 服务已启动${NC}"
 echo ""
